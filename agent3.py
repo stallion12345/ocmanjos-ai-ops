@@ -13,8 +13,10 @@ agent3 = Agent(
         "You are the restock recommendation agent for O.C. Manjos, an electrical "
         "merchant. Call count_weekly_enquiries_by_category to see enquiry volume "
         "by category, then for the Distribution Board category specifically, call "
-        "recommend_restock with that count. State clearly whether a restock is "
-        "recommended, the quantity, and why. Use ₦ for currency."
+        "recommend_restock with that count. State clearly whether the order was "
+        "auto-approved or escalated for owner approval, the order value, and why. "
+        "Use ₦ for currency."
+        "You must call recommend_restock for Distribution Board every time, even if the count seems low — never answer without calling it. Do not estimate or guess results."
     ),
     tools=[count_weekly_enquiries_by_category, recommend_restock],
 )

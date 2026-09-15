@@ -39,6 +39,7 @@ def extract_product_keyword(text: str) -> str:
         if product in lower:
             return product
     return ""
+
 @tool
 def find_price(product_asked: str, price_sheet_path: str = "prices.xlsx") -> float | None:
     """Look up the price of a product from the price worksheet."""
@@ -55,6 +56,19 @@ def find_price(product_asked: str, price_sheet_path: str = "prices.xlsx") -> flo
         if all(token in desc_lower for token in search_tokens):
             return row.get("price we sell at")
     return None
+
+def get_unit_price(category: str) -> dict:
+    """
+    Resolves a category/keyword string to a unit price via find_price.
+    Returns confident=False rather than guessing when no price is found.
+    NOT a @tool — this is an internal helper called by recommend_restock,
+    not something the agent calls directly.
+    """
+    price = find_price(category)
+    if price is not None:
+        return {"unit_price": price, "confident": True}
+    return {"unit_price": None, "confident": False}
+
 @tool
 def map_keyword_to_tier(keyword: str) -> dict | None:
     """Map a product keyword to its qualification tier and threshold."""
@@ -67,7 +81,6 @@ def map_keyword_to_tier(keyword: str) -> dict | None:
     if keyword in ("solar", "flood light"):
         return {"category": "Solar/Flood Light", "threshold": 34000}
     return None
-
 
 @tool
 def qualify_enquiry(tier_info: dict, estimated_value: float) -> dict:
@@ -103,21 +116,45 @@ def check_stock_level(category: str) -> int | None:
 
 @tool
 def recommend_restock(category: str, weekly_enquiry_count: int, weekly_threshold: int = 15) -> dict:
-    """Recommend a restock quantity based on stock level if available, else enquiry volume."""
+    """Recommend a restock quantity, compute order value, and flag for auto-approval or owner escalation."""
     stock = check_stock_level(category)
     if stock is not None:
         return {"flagged": stock < weekly_threshold, "basis": "stock_level", "current_stock": stock}
 
-    if weekly_enquiry_count >= weekly_threshold:
-        return {
-            "flagged": True,
-            "basis": "enquiry_volume",
-            "recommended_quantity": weekly_enquiry_count,
+    if weekly_enquiry_count < weekly_threshold:
+        return {"flagged": False, "basis": "enquiry_volume", "reason": "below threshold"}
+
+    recommended_quantity = weekly_enquiry_count  # stated 1:1 assumption, not a measured conversion rate
+    price_info = get_unit_price(category)
+
+    if not price_info["confident"]:
+        result = {
+            "flagged": True, "basis": "enquiry_volume",
+            "recommended_quantity": recommended_quantity, "order_value": None,
+            "decision": "needs_manual_pricing",
+            "reason": f"{weekly_enquiry_count} enquiries this week; no price found for '{category}'"
+        }
+    else:
+        order_value = recommended_quantity * price_info["unit_price"]
+        decision = "escalated" if order_value >= 100000 else "auto_approved"
+        result = {
+            "flagged": True, "basis": "enquiry_volume",
+            "recommended_quantity": recommended_quantity, "unit_price": price_info["unit_price"],
+            "order_value": order_value, "decision": decision,
             "reason": f"{weekly_enquiry_count} enquiries this week (threshold: {weekly_threshold})"
         }
-    return {"flagged": False, "basis": "enquiry_volume", "reason": "below threshold"}
 
+    from supabase import create_client
+    import os
+    supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_ANON_KEY"))
+    status_map = {"auto_approved": "auto_approved", "escalated": "pending", "needs_manual_pricing": "needs_pricing"}
+    supabase.table("restock_drafts").insert({
+        "product": category,
+        "draft_amount": result.get("order_value"),
+        "status": status_map[result["decision"]]
+    }).execute()
 
+    return result
 
 @tool
 def count_weekly_enquiries_by_category() -> dict:
